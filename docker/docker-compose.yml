@@ -1,0 +1,95 @@
+services:
+
+  # ── ZOOKEEPER ───────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  # ── KAFKA ───────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092" # <-- Exposes Kafka to your local Windows machine
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # <-- Updated listeners so both Docker and Windows can connect -->
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 4
+
+  # ── KAFKA UI ────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "9090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  # ── PRODUCER ────────────────────────────────────────────────
+  producer:
+    image: python:3.11-slim
+    container_name: producer
+    depends_on:
+      - kafka
+    working_dir: /app
+    volumes:
+      - ../producer:/app
+    command: >
+      sh -c "pip install kafka-python --quiet &&
+             sleep 20 &&
+             python transaction_producer.py"
+    environment:
+      KAFKA_BROKER: kafka:9092
+
+  # ── SPARK STREAMING ─────────────────────────────────────────
+  spark:
+    image: apache/spark:3.5.0 # <-- FIXED: Removed both the "v" AND the "-py"
+    container_name: spark-fraud-detector
+    depends_on:
+      - kafka
+    user: root
+    volumes:
+      - ../consumer:/app
+    environment:
+      KAFKA_BROKER: kafka:9092
+    command: >
+      /opt/spark/bin/spark-submit
+      --master local[4]
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 
+      --py-files /app/fraud_rules.py 
+      --conf spark.jars.ivy=/tmp/.ivy
+      --conf spark.sql.shuffle.partitions=4
+      /app/fraud_detector.py
+
+  # ── ALERT CONSUMER ──────────────────────────────────────────
+  alert-consumer:
+    image: python:3.11-slim
+    container_name: alert-consumer
+    depends_on:
+      - kafka
+    working_dir: /app
+    volumes:
+      - ../consumer:/app
+    command: >
+      sh -c "pip install kafka-python --quiet &&
+             sleep 30 &&
+             python alert_consumer.py alerts"
+    environment:
+      KAFKA_BROKER: kafka:9092
